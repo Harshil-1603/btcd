@@ -1288,12 +1288,15 @@ func TestIsSyncCandidateRegtest(t *testing.T) {
 // while the current sync peer has not delivered the announced blocks.
 func TestIBDRequestsAnnouncedHeaders(t *testing.T) {
 	t.Parallel()
+
+	// Keep the sync peer idle while another peer announces a block.
 	sm, teardown := makeMockSyncManager(t, &chaincfg.RegressionNetParams)
 	defer teardown()
 	syncPeer := newSyncCandidate(t, sm, 2)
 	sm.syncPeer = syncPeer
 	sm.ibdMode = true
 
+	// Use a real connection to observe getheaders and getdata messages.
 	requests := make(chan *wire.MsgGetHeaders, 4)
 	getData := make(chan *wire.MsgGetData, 4)
 	handshake := make(chan struct{}, 2)
@@ -1302,18 +1305,24 @@ func TestIBDRequestsAnnouncedHeaders(t *testing.T) {
 	defer func() {
 		require.NoError(t, listener.Close())
 	}()
+
 	local, err := net.Dial("tcp", listener.Addr().String())
 	require.NoError(t, err)
+
 	remote, err := listener.Accept()
 	require.NoError(t, err)
+
 	announcer := peer.NewInboundPeer(&peer.Config{
 		ChainParams:    &chaincfg.RegressionNetParams,
 		Services:       wire.SFNodeNetwork | wire.SFNodeWitness,
 		AllowSelfConns: true,
 		Listeners: peer.MessageListeners{
-			OnVerAck: func(*peer.Peer, *wire.MsgVerAck) { handshake <- struct{}{} },
+			OnVerAck: func(*peer.Peer, *wire.MsgVerAck) {
+				handshake <- struct{}{}
+			},
 		},
 	})
+
 	other, err := peer.NewOutboundPeer(&peer.Config{
 		ChainParams:    &chaincfg.RegressionNetParams,
 		Services:       wire.SFNodeNetwork | wire.SFNodeWitness,
@@ -1322,11 +1331,17 @@ func TestIBDRequestsAnnouncedHeaders(t *testing.T) {
 			return chaincfg.RegressionNetParams.GenesisHash, 2, nil
 		},
 		Listeners: peer.MessageListeners{
-			OnVerAck: func(*peer.Peer, *wire.MsgVerAck) { handshake <- struct{}{} },
-			OnGetHeaders: func(_ *peer.Peer, msg *wire.MsgGetHeaders) {
+			OnVerAck: func(*peer.Peer, *wire.MsgVerAck) {
+				handshake <- struct{}{}
+			},
+			OnGetHeaders: func(_ *peer.Peer,
+				msg *wire.MsgGetHeaders) {
+
 				requests <- msg
 			},
-			OnGetData: func(_ *peer.Peer, msg *wire.MsgGetData) { getData <- msg },
+			OnGetData: func(_ *peer.Peer, msg *wire.MsgGetData) {
+				getData <- msg
+			},
 		},
 	}, listener.Addr().String())
 	require.NoError(t, err)
@@ -1336,11 +1351,14 @@ func TestIBDRequestsAnnouncedHeaders(t *testing.T) {
 		announcer.WaitForDisconnect()
 		other.WaitForDisconnect()
 	}()
+
+	// Complete both handshakes before delivering inventory to the manager.
 	announcer.AssociateConnection(remote)
 	other.AssociateConnection(local)
 	for range 2 {
 		select {
 		case <-handshake:
+
 		case <-time.After(5 * time.Second):
 			t.Fatal("handshake timed out")
 		}
@@ -1350,38 +1368,53 @@ func TestIBDRequestsAnnouncedHeaders(t *testing.T) {
 		requestedTxns:   make(map[chainhash.Hash]struct{}),
 		requestedBlocks: make(map[chainhash.Hash]struct{}),
 	}
+
 	// Known blocks and transaction-only invs must not request headers.
 	known := wire.NewMsgInv()
-	require.NoError(t, known.AddInvVect(wire.NewInvVect(
-		wire.InvTypeBlock, chaincfg.RegressionNetParams.GenesisHash,
-	)))
+	require.NoError(t, known.AddInvVect(
+		wire.NewInvVect(
+			wire.InvTypeBlock,
+			chaincfg.RegressionNetParams.GenesisHash,
+		),
+	))
 	sm.handleInvMsg(&invMsg{inv: known, peer: announcer})
+
 	txOnly := wire.NewMsgInv()
-	require.NoError(t, txOnly.AddInvVect(wire.NewInvVect(
-		wire.InvTypeTx, &zeroHash,
-	)))
+	require.NoError(t, txOnly.AddInvVect(
+		wire.NewInvVect(wire.InvTypeTx, &zeroHash),
+	))
 	sm.handleInvMsg(&invMsg{inv: txOnly, peer: announcer})
+
+	// An unknown block must trigger a header request without fetching data.
 	blocks := generateTestBlocks(t, &chaincfg.RegressionNetParams, 2)
 	inv := wire.NewMsgInv()
-	require.NoError(t, inv.AddInvVect(wire.NewInvVect(
-		wire.InvTypeBlock, blocks[1].Hash(),
-	)))
+	require.NoError(t, inv.AddInvVect(
+		wire.NewInvVect(wire.InvTypeBlock, blocks[1].Hash()),
+	))
 	sm.handleInvMsg(&invMsg{inv: inv, peer: announcer})
 	select {
 	case request := <-requests:
 		require.Equal(t, *blocks[1].Hash(), request.HashStop)
 		require.NotEmpty(t, request.BlockLocatorHashes)
-		require.Equal(t, *chaincfg.RegressionNetParams.GenesisHash,
-			*request.BlockLocatorHashes[0])
+		require.Equal(
+			t, *chaincfg.RegressionNetParams.GenesisHash,
+			*request.BlockLocatorHashes[0],
+		)
+
 	case <-time.After(5 * time.Second):
 		t.Fatal("no getheaders for the block announced during IBD")
 	}
-	require.Empty(t, sm.requestedBlocks,
-		"an inv should request headers before downloading blocks")
+	require.Empty(
+		t, sm.requestedBlocks,
+		"an inv should request headers before downloading blocks",
+	)
 
+	// Validated headers must lead to a block download.
 	headers := wire.NewMsgHeaders()
 	for _, block := range blocks {
-		require.NoError(t, headers.AddBlockHeader(&block.MsgBlock().Header))
+		require.NoError(t, headers.AddBlockHeader(
+			&block.MsgBlock().Header,
+		))
 	}
 	sm.handleHeadersMsg(&headersMsg{headers: headers, peer: announcer})
 	_, height := sm.chain.BestHeader()
@@ -1389,6 +1422,7 @@ func TestIBDRequestsAnnouncedHeaders(t *testing.T) {
 	select {
 	case data := <-getData:
 		require.Len(t, data.InvList, 2)
+
 	case <-time.After(5 * time.Second):
 		t.Fatal("verified headers did not lead to block requests")
 	}
