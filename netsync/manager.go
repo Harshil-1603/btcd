@@ -1134,7 +1134,8 @@ func (sm *SyncManager) handleInvMsg(imsg *invMsg) {
 		if !haveInv {
 			bestHash, _ := sm.chain.BestHeader()
 			locator := sm.chain.BlockLocatorFromHash(&bestHash)
-			if err := peer.PushGetHeadersMsg(locator, &iv.Hash); err != nil {
+			err := peer.PushGetHeadersMsg(locator, &iv.Hash)
+			if err != nil {
 				log.Warnf("Unable to request announced headers: %v", err)
 			}
 		}
