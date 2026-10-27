@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/btcsuite/btcd/btcjson"
@@ -666,4 +671,94 @@ func TestGetTxSpendingPrevOut(t *testing.T) {
 	results, err = handleGetTxSpendingPrevOut(s, cmd, closeChan)
 	require.NoError(err)
 	require.Equal(expectedResults, results)
+}
+
+// TestRPCQuirksNullID checks the notification exception used by Core clients.
+func TestRPCQuirksNullID(t *testing.T) {
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+	s := &rpcServer{}
+	for _, quirks := range []bool{false, true} {
+		cfg = &config{RPCQuirks: quirks}
+		for _, version := range []btcjson.RPCVersion{
+			"", btcjson.RpcVersion1, btcjson.RpcVersion2,
+		} {
+			request := &btcjson.Request{
+				Jsonrpc: version,
+				Method:  "uptime",
+				Params:  []json.RawMessage{},
+			}
+			response := s.processRequest(request, true, nil)
+			if !quirks || version != "" {
+				require.Empty(t, response)
+				continue
+			}
+			var reply btcjson.Response
+			require.NoError(t, json.Unmarshal(response, &reply))
+			require.Nil(t, reply.ID)
+			require.Nil(t, reply.Error)
+			require.NotEmpty(t, reply.Result)
+			require.Equal(t, btcjson.RpcVersion1, reply.Jsonrpc)
+		}
+	}
+	cfg = &config{RPCQuirks: true}
+	response := s.processRequest(&btcjson.Request{
+		Method: "no_such_method",
+		Params: []json.RawMessage{},
+	}, true, nil)
+	var reply btcjson.Response
+	require.NoError(t, json.Unmarshal(response, &reply))
+	require.Nil(t, reply.ID)
+	require.NotNil(t, reply.Error)
+	require.Equal(t, btcjson.ErrRPCMethodNotFound.Code, reply.Error.Code)
+	require.Equal(t, btcjson.RpcVersion1, reply.Jsonrpc)
+
+}
+
+// TestHTTPRPCQuirksNullID checks real HTTP replies for absent and null IDs,
+// both for single requests and entries in a batch.
+func TestHTTPRPCQuirksNullID(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config{RPCQuirks: true}
+	t.Cleanup(func() { cfg = oldCfg })
+	s := &rpcServer{statusLines: make(map[int]string)}
+	server := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			s.jsonRPCRead(w, r, true)
+		},
+	))
+	t.Cleanup(server.Close)
+
+	for _, id := range []string{"", `,"id":null`} {
+		request := `{"method":"uptime","params":[]` + id + `}`
+		for _, batch := range []bool{false, true} {
+			body := request
+			if batch {
+				body = "[" + body + "]"
+			}
+			resp, err := server.Client().Post(
+				server.URL, "application/json",
+				strings.NewReader(body),
+			)
+			require.NoError(t, err)
+			replyBody, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, http.StatusOK, resp.StatusCode)
+
+			var replies []btcjson.Response
+			if batch {
+				require.NoError(t, json.Unmarshal(replyBody, &replies))
+			} else {
+				var reply btcjson.Response
+				require.NoError(t, json.Unmarshal(replyBody, &reply))
+				replies = append(replies, reply)
+			}
+			require.Len(t, replies, 1)
+			require.Nil(t, replies[0].ID)
+			require.Nil(t, replies[0].Error)
+			require.NotEmpty(t, replies[0].Result)
+			require.Equal(t, btcjson.RpcVersion1, replies[0].Jsonrpc)
+		}
+	}
 }
