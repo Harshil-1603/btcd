@@ -67,8 +67,7 @@ func (m *MsgAddrV2) BtcEncode(w io.Writer, pver uint32,
 	// Count supported addresses so the header matches the payload.
 	count := 0
 	for _, na := range m.AddrList {
-		_, ok := na.Addr.(*torv2Addr)
-		if ok {
+		if _, ok := na.Addr.(*torv2Addr); ok {
 			continue
 		}
 
@@ -86,10 +85,9 @@ func (m *MsgAddrV2) BtcEncode(w io.Writer, pver uint32,
 		return err
 	}
 
-	// Tor v2 is retired; keep its entries out of outgoing addr messages.
 	for _, na := range m.AddrList {
-		_, ok := na.Addr.(*torv2Addr)
-		if ok {
+		// Tor v2 is retired; omit its entries from outgoing messages.
+		if _, ok := na.Addr.(*torv2Addr); ok {
 			continue
 		}
 
