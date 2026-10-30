@@ -4321,8 +4321,9 @@ func (s *rpcServer) processRequest(request *btcjson.Request, isAdmin bool, close
 			return msg
 		}
 
-		// Requests without an ID are notifications unless RPC quirks
-		// permit an unversioned request from a Bitcoin Core client.
+		// Requests without an ID are notifications and must not receive
+		// a response per the JSON-RPC spec. RPC quirks permit replies
+		// for unversioned requests.
 		if request.ID == nil && !quirks {
 			return nil
 		}
